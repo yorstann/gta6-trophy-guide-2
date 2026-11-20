@@ -1,52 +1,101 @@
-// A plain checklist of the 55 trophies: tick one off and it stays ticked (localStorage); export and import the ticks.
-const KEY = 'gta6-trophy-checklist';
-const rows = document.getElementById('rows');
-const grade = document.getElementById('grade');
-let earned = new Set(JSON.parse(localStorage.getItem(KEY) ?? '[]'));
-const doc = await (await fetch('data/trophies.json')).json();
+// Leonida Legend 2 — entry point. Loads the trophy data, restores progress,
+// wires the shell controls (spoiler shield, export / import / reset) and routes
+// the hash: #/ checklist, #/roadmap, #/missables, #/trophy/<id>. The list also
+// accepts deep links such as #/trophies?shield=on&filter=missable.
 
-function save() {
-  localStorage.setItem(KEY, JSON.stringify([...earned]));
+import { CHIPS, filters } from './filters.js';
+import { bindImport, exportProgress } from './io.js';
+import { renderDetail } from './detail.js';
+import { renderHeader, renderList } from './render.js';
+import { renderMissables } from './missables.js';
+import { renderRoadmap } from './roadmap.js';
+import { loadData, loadState, replaceState, resetState, setShield } from './store.js';
+
+const ui = { trophies: [], state: null };
+const view = document.getElementById('view');
+
+function parseHash() {
+  const raw = location.hash.replace(/^#/, '') || '/';
+  const [path, query] = raw.split('?');
+  return { path: path || '/', params: new URLSearchParams(query ?? '') };
 }
 
-function render() {
-  rows.replaceChildren();
-  for (const t of doc.trophies) {
-    if (grade.value !== 'all' && t.grade !== grade.value) continue;
-    const tr = document.createElement('tr');
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.checked = earned.has(t.name);
-    box.addEventListener('change', () => {
-      if (box.checked) earned.add(t.name);
-      else earned.delete(t.name);
-      save();
-      render();
-    });
-    const cells = [box, `${t.name}\n${t.description}`, t.grade, t.guide];
-    for (const c of cells) {
-      const td = document.createElement('td');
-      if (typeof c === 'string') td.textContent = c;
-      else td.append(c);
-      tr.append(td);
-    }
-    rows.append(tr);
+// Deep-link parameters seed the UI once per navigation: shield=on|off and
+// filter=<chip>. After that the controls own the state.
+function applyParams(params) {
+  if (params.has('shield')) setShield(ui.state, params.get('shield') === 'on');
+  const chip = params.get('filter');
+  if (chip && CHIPS.some((c) => c.id === chip)) filters.chip = chip;
+}
+
+function markNav(routeName) {
+  for (const a of document.querySelectorAll('[data-nav]')) {
+    a.classList.toggle('active', a.dataset.nav === routeName);
   }
-  document.getElementById('progress').textContent = `${earned.size} of ${doc.trophies.length} earned`;
+  document.getElementById('shield').checked = ui.state.shield;
 }
 
-document.getElementById('export').addEventListener('click', () => {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify([...earned])], { type: 'application/json' }));
-  a.download = 'trophy-progress.json';
-  a.click();
+function renderRoute() {
+  const { path } = parseHash();
+  if (path === '/roadmap') {
+    markNav('roadmap');
+    renderRoadmap(view, ui);
+  } else if (path === '/missables') {
+    markNav('missables');
+    renderMissables(view, ui, refresh);
+  } else if (path.startsWith('/trophy/')) {
+    markNav('list');
+    renderDetail(view, ui, Number(path.slice('/trophy/'.length)), refresh);
+  } else {
+    markNav('list');
+    renderList(view, ui, refresh);
+  }
+}
+
+function refresh() {
+  renderHeader(ui);
+  renderRoute();
+}
+
+function bindShell() {
+  document.getElementById('shield').addEventListener('change', (e) => {
+    setShield(ui.state, e.target.checked);
+    // Keep a deep-linked hash honest, so the next navigation does not revert it.
+    const { path, params } = parseHash();
+    params.set('shield', ui.state.shield ? 'on' : 'off');
+    history.replaceState(null, '', `#${path}?${params.toString()}`);
+    refresh();
+  });
+  document.getElementById('export').addEventListener('click', () => exportProgress(ui.state));
+  bindImport(
+    document.getElementById('import'),
+    ui.trophies,
+    (next) => {
+      replaceState(ui.state, next);
+      refresh();
+    },
+    (message) => alert(message),
+  );
+  document.getElementById('reset').addEventListener('click', () => {
+    if (!confirm('Reset all progress? Earned trophies and counters will be cleared.')) return;
+    resetState(ui.state);
+    refresh();
+  });
+}
+
+async function boot() {
+  const data = await loadData();
+  ui.trophies = data.trophies;
+  ui.state = loadState(ui.trophies);
+  applyParams(parseHash().params);
+  bindShell();
+  window.addEventListener('hashchange', () => {
+    applyParams(parseHash().params);
+    refresh();
+  });
+  refresh();
+}
+
+boot().catch((err) => {
+  view.textContent = `The guide could not load its trophy data (${err.message}). Serve the app over HTTP — see the README.`;
 });
-document.getElementById('import').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  earned = new Set(JSON.parse(await file.text()));
-  save();
-  render();
-});
-grade.addEventListener('change', render);
-render();
